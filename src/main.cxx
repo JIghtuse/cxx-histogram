@@ -1,13 +1,16 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <future>
 #include <unordered_map>
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <vector>
 #include <boost/program_options.hpp>
 #include "bitmap.h"
 #include "hpctimer.h"
+#include "join_threads.h"
 
 namespace po = boost::program_options;
 
@@ -21,7 +24,7 @@ struct EnumClassHash
 };
 
 constexpr auto kMaxPixelValue{256};
-constexpr auto kBuckets{16};
+constexpr auto kBuckets{256};
 constexpr auto kBorder{kMaxPixelValue / kBuckets};
 
 /* luminance values */
@@ -51,7 +54,7 @@ enum class Algorithm {
     Mutex,
 };
 
-void histogram_sequential(const bitmap& b, size_t)
+void histogram_sequential(const bitmap& b, const size_t)
 {
     for (size_t i = 0; i < b.size(); ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
@@ -59,40 +62,103 @@ void histogram_sequential(const bitmap& b, size_t)
     }
 }
 
-void histogram_transactional(const bitmap& b, size_t)
+size_t get_num_threads(const bitmap& b, const size_t nthreads)
 {
-    for (size_t i = 0; i < b.size(); ++i) {
-        auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        __transaction_atomic {
-            ++histogram[bucket];
-        }
-    }
+    size_t const min_per_thread{200};
+    size_t const max_threads{(b.size() + min_per_thread - 1) / min_per_thread};
+    return std::min(nthreads ? nthreads : 2, max_threads);
 }
 
-void histogram_atomic(const bitmap& b, size_t)
+void histogram_mutex(const bitmap& b, size_t start, size_t end, std::mutex& m)
 {
-    for (size_t i = 0; i < b.size(); ++i) {
-        auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        __sync_fetch_and_add(&histogram[bucket], 1);
-    }
-}
-
-void histogram_mutex(const bitmap& b, size_t)
-{
-    std::mutex m;
-    for (size_t i = 0; i < b.size(); ++i) {
+    for (size_t i = start; i < end; ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
         std::lock_guard<std::mutex> lock{m};
         ++histogram[bucket];
     }
 }
 
-std::unordered_map<Algorithm, void(*)(const bitmap&, size_t), EnumClassHash> function_selector{
-    { Algorithm::Sequential, histogram_sequential },
+void histogram_atomic(const bitmap& b, size_t start, size_t end, std::mutex&)
+{
+    for (size_t i = start; i < end; ++i) {
+        auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
+        __sync_fetch_and_add(&histogram[bucket], 1);
+    }
+}
+
+void histogram_transactional(const bitmap& b, const size_t nthreads)
+{
+    auto num_threads = get_num_threads(b, nthreads);
+    size_t const block_size{b.size() / num_threads};
+
+    std::vector<std::future<void> > futures{num_threads - 1};
+    std::vector<std::thread> threads{num_threads - 1};
+    join_threads joiner(threads);
+
+    size_t block_start = 0;
+    for (size_t i = 0; i < (num_threads - 1); ++i) {
+        auto block_end = block_start;
+        block_end += block_size;
+
+        std::packaged_task<void(void)> task([block_start,block_end,&b] {
+            for (size_t j = block_start; j < block_end; ++j) {
+                auto bucket = static_cast<int>(luminance(b.pixels()[j]) / kBorder);
+                __transaction_atomic {
+                    ++histogram[bucket];
+                }
+            }
+        });
+        futures[i] = task.get_future();
+        threads[i] = std::thread(std::move(task));
+        block_start = block_end;
+    }
+    for (size_t i = block_start; i < b.size(); ++i) {
+        auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
+        __transaction_atomic {
+            ++histogram[bucket];
+        }
+    }
+    for (size_t i = 0; i < (num_threads - 1); ++i) {
+        futures[i].get();
+    }
+}
+
+using ParallelHistFunction = void(*)(const bitmap&, const size_t, const size_t, std::mutex&);
+
+std::unordered_map<Algorithm, ParallelHistFunction, EnumClassHash> parallel_function_selector{
     { Algorithm::Atomic, histogram_atomic },
     { Algorithm::Mutex, histogram_mutex },
-    { Algorithm::TransacitonalMemory, histogram_transactional },
+//    { Algorithm::TransacitonalMemory, histogram_transactional },
 };
+
+void histogram_parallel(const bitmap& b, const size_t nthreads, ParallelHistFunction function)
+{
+    std::mutex m;
+    auto num_threads = get_num_threads(b, nthreads);
+    size_t const block_size{b.size() / num_threads};
+
+    std::vector<std::future<void> > futures{num_threads - 1};
+    std::vector<std::thread> threads{num_threads - 1};
+    join_threads joiner(threads);
+
+    size_t block_start = 0;
+    for (size_t i = 0; i < (num_threads - 1); ++i) {
+        auto block_end = block_start;
+        block_end += block_size;
+
+        std::packaged_task<void(void)> task([block_start,block_end,function,&b,&m] {
+            function(b, block_start, block_end, m);
+        });
+
+        futures[i] = task.get_future();
+        threads[i] = std::thread(std::move(task));
+        block_start = block_end;
+    }
+    function(b, block_start, b.size(), m);
+    for (size_t i = 0; i < (num_threads - 1); ++i) {
+        futures[i].get();
+    }
+}
 
 void print_info(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
 {
@@ -117,15 +183,25 @@ void print_info(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
     }
 }
 
-void start_experiment(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
+double run_experiment(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
 {
-    print_info(bmap, nthreads, algorithm);
-
+    // print_info(bmap, nthreads, algorithm);
     auto t = hpctimer_wtime();
-    function_selector[algorithm](bmap, nthreads);
+    switch (algorithm) {
+    case Algorithm::Mutex:
+    case Algorithm::Atomic:
+        histogram_parallel(bmap, nthreads, parallel_function_selector[algorithm]);
+        break;
+    case Algorithm::TransacitonalMemory:
+        histogram_transactional(bmap, nthreads);
+        break;
+    case Algorithm::Sequential:
+        histogram_sequential(bmap, nthreads);
+        break;
+    }
     t = hpctimer_wtime() - t;
 
-    std::cout << "Running time: " << t << std::endl << std::endl;
+    return t;
 }
 
 int main(int argc, char* argv[])
@@ -133,7 +209,7 @@ int main(int argc, char* argv[])
     po::options_description desc("Available options");
     desc.add_options()
         ("help", "produce help message")
-        ("bitmap_size", po::value<size_t>(), "set bitmap size")
+        ("bitmap-size", po::value<size_t>(), "set bitmap size")
         ("nthreads", po::value<size_t>(), "set number of threads")
     ;
 
@@ -146,11 +222,11 @@ int main(int argc, char* argv[])
         return 0;
     }
 
-    if (!vm.count("bitmap_size")) {
+    if (!vm.count("bitmap-size")) {
         std::cout << "Bitmap size was not set.\n";
         return 1;
     }
-    auto bitmap_size = vm["bitmap_size"].as<size_t>();
+    auto bitmap_size = vm["bitmap-size"].as<size_t>();
 
     size_t nthreads = std::thread::hardware_concurrency();
     if (vm.count("nthreads")) {
@@ -158,24 +234,22 @@ int main(int argc, char* argv[])
     }
 
     bitmap bmap(bitmap_size);
+    std::array<double, 4> results;
 
-    start_experiment(bmap, nthreads, Algorithm::Sequential);
-    auto etanol = histogram;
-    print_histogram();
     std::fill(std::begin(histogram), std::end(histogram), 0);
+    results[0] = run_experiment(bmap, nthreads, Algorithm::Sequential);
 
-    start_experiment(bmap, nthreads, Algorithm::TransacitonalMemory);
-    assert(etanol == histogram);
-    print_histogram();
     std::fill(std::begin(histogram), std::end(histogram), 0);
+    results[1] = run_experiment(bmap, nthreads, Algorithm::TransacitonalMemory);
 
-    start_experiment(bmap, nthreads, Algorithm::Mutex);
-    assert(etanol == histogram);
-    print_histogram();
     std::fill(std::begin(histogram), std::end(histogram), 0);
+    results[2] = run_experiment(bmap, nthreads, Algorithm::Mutex);
 
-    start_experiment(bmap, nthreads, Algorithm::Atomic);
-    assert(etanol == histogram);
-    print_histogram();
     std::fill(std::begin(histogram), std::end(histogram), 0);
+    results[3] = run_experiment(bmap, nthreads, Algorithm::Atomic);
+
+    std::cout << bitmap_size << ' ';
+    for (auto value : results)
+        std::cout << value << ' ';
+    std::cout << std::endl;
 }

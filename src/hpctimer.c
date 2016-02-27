@@ -113,7 +113,7 @@ static double hpctimer_wtime_tsc()
  */
 static int hpctimer_tsc_initialize()
 {
-    printf("Initializing timer...\n");
+//    printf("Initializing timer...\n");
     hpctimer_overhead = hpctimer_measure_overhead();
     hpctimer_freq = hpctimer_calibrate_sleep(hpctimer_overhead);
     return HPCTIMER_SUCCESS;    
