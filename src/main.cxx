@@ -37,13 +37,18 @@ constexpr auto luminance(const pixel& p)
     return rY * p.red + gY * p.green + bY * p.blue;
 }
 
-std::array<int, kBuckets> histogram;
+struct Bucket {
+	std::mutex m{};
+	int value{};
+};
+
+std::array<Bucket, kBuckets> histogram;
 
 void print_histogram()
 {
     std::cout << "Histogram: ";
-    for (auto i : histogram)
-        std::cout << i << ' ';
+    for (auto& bucket : histogram)
+        std::cout << bucket.value << ' ';
     std::cout << std::endl;
 }
 
@@ -58,7 +63,7 @@ void histogram_sequential(const bitmap& b, const size_t)
 {
     for (size_t i = 0; i < b.size(); ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        ++histogram[bucket];
+        ++histogram[bucket].value;
     }
 }
 
@@ -69,20 +74,20 @@ size_t get_num_threads(const bitmap& b, const size_t nthreads)
     return std::min(nthreads ? nthreads : 2, max_threads);
 }
 
-void histogram_mutex(const bitmap& b, size_t start, size_t end, std::mutex& m)
+void histogram_mutex(const bitmap& b, size_t start, size_t end)
 {
     for (size_t i = start; i < end; ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        std::lock_guard<std::mutex> lock{m};
-        ++histogram[bucket];
+        std::lock_guard<std::mutex> lock{histogram[bucket].m};
+        ++histogram[bucket].value;
     }
 }
 
-void histogram_atomic(const bitmap& b, size_t start, size_t end, std::mutex&)
+void histogram_atomic(const bitmap& b, size_t start, size_t end)
 {
     for (size_t i = start; i < end; ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        __sync_fetch_and_add(&histogram[bucket], 1);
+        __sync_fetch_and_add(&histogram[bucket].value, 1);
     }
 }
 
@@ -104,7 +109,7 @@ void histogram_transactional(const bitmap& b, const size_t nthreads)
             for (size_t j = block_start; j < block_end; ++j) {
                 auto bucket = static_cast<int>(luminance(b.pixels()[j]) / kBorder);
                 __transaction_atomic {
-                    ++histogram[bucket];
+                    ++histogram[bucket].value;
                 }
             }
         });
@@ -115,7 +120,7 @@ void histogram_transactional(const bitmap& b, const size_t nthreads)
     for (size_t i = block_start; i < b.size(); ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
         __transaction_atomic {
-            ++histogram[bucket];
+            ++histogram[bucket].value;
         }
     }
     for (size_t i = 0; i < (num_threads - 1); ++i) {
@@ -123,7 +128,7 @@ void histogram_transactional(const bitmap& b, const size_t nthreads)
     }
 }
 
-using ParallelHistFunction = void(*)(const bitmap&, const size_t, const size_t, std::mutex&);
+using ParallelHistFunction = void(*)(const bitmap&, const size_t, const size_t);
 
 std::unordered_map<Algorithm, ParallelHistFunction, EnumClassHash> parallel_function_selector{
     { Algorithm::Atomic, histogram_atomic },
@@ -133,7 +138,6 @@ std::unordered_map<Algorithm, ParallelHistFunction, EnumClassHash> parallel_func
 
 void histogram_parallel(const bitmap& b, const size_t nthreads, ParallelHistFunction function)
 {
-    std::mutex m;
     auto num_threads = get_num_threads(b, nthreads);
     size_t const block_size{b.size() / num_threads};
 
@@ -146,15 +150,15 @@ void histogram_parallel(const bitmap& b, const size_t nthreads, ParallelHistFunc
         auto block_end = block_start;
         block_end += block_size;
 
-        std::packaged_task<void(void)> task([block_start,block_end,function,&b,&m] {
-            function(b, block_start, block_end, m);
+        std::packaged_task<void(void)> task([block_start,block_end,function,&b] {
+            function(b, block_start, block_end);
         });
 
         futures[i] = task.get_future();
         threads[i] = std::thread(std::move(task));
         block_start = block_end;
     }
-    function(b, block_start, b.size(), m);
+    function(b, block_start, b.size());
     for (size_t i = 0; i < (num_threads - 1); ++i) {
         futures[i].get();
     }
@@ -185,7 +189,9 @@ void print_info(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
 
 double run_experiment(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
 {
-    std::fill(std::begin(histogram), std::end(histogram), 0);
+    for (auto& bucket: histogram) {
+        bucket.value = 0;
+    }
     // print_info(bmap, nthreads, algorithm);
     auto t = hpctimer_wtime();
     switch (algorithm) {
