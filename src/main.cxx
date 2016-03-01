@@ -60,7 +60,7 @@ enum class Algorithm {
 };
 
 using HistUpdateArray = std::array<int, histogram.size()>;
-using ParallelHistUpdater = void(*)(HistUpdateArray);
+using ParallelHistUpdater = void(*)(const HistUpdateArray&);
 
 void histogram_sequential(const bitmap& b, const size_t)
 {
@@ -87,7 +87,7 @@ HistUpdateArray calculate_updates(const bitmap& b, size_t start, size_t end)
     return updates;
 }
 
-void histogram_mutex(HistUpdateArray updates)
+void histogram_mutex(const HistUpdateArray& updates)
 {
     for (size_t i = 0; i < histogram.size(); ++i) {
         if (updates[i]) {
@@ -97,7 +97,7 @@ void histogram_mutex(HistUpdateArray updates)
     }
 }
 
-void histogram_atomic(HistUpdateArray updates)
+void histogram_atomic(const HistUpdateArray& updates)
 {
     for (size_t i = 0; i < histogram.size(); ++i) {
         if (updates[i]) {
@@ -106,7 +106,7 @@ void histogram_atomic(HistUpdateArray updates)
     }
 }
 
-void histogram_transactional(HistUpdateArray updates)
+void histogram_transactional(const HistUpdateArray& updates)
 {
     for (size_t i = 0; i < histogram.size(); ++i) {
         if (updates[i]) {

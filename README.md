@@ -25,7 +25,7 @@ updates to histogram on local array for each running thread:
 
 Then, we use synchronization primitives to safely update a global histogram:
 
-    void histogram_mutex(HistUpdateArray updates)
+    void histogram_mutex(const HistUpdateArray& updates)
     {
         for (size_t i = 0; i < histogram.size(); ++i) {
             if (updates[i]) {
