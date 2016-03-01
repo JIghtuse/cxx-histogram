@@ -6,7 +6,7 @@
 
 struct bitmap {
 public:
-    bitmap(size_t size);
+    explicit bitmap(size_t size);
     ~bitmap();
     bitmap(const bitmap&) = delete;
     bitmap& operator=(const bitmap&) = delete;
