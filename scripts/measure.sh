@@ -1,5 +1,7 @@
-#!/bin/sh
+#!/bin/bash
 
-for i in 1024 4096 16384 65536 262144 1048576 4194304 16777216 67108864 268435456 1073741824 4294967296; do
-    ./hist --bitmap-size $i >> results.txt
+rm -f results.txt
+for i in $(seq 8 30); do
+    pow=$(bc <<< 2^$i)
+    ../build/hist --bitmap-size "$pow" --nthreads 4 >> results.txt
 done

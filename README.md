@@ -41,11 +41,17 @@ Some resulting graphs and scripts to plot them can be found in
 
 * hostname `gamma`
 
-    Intel(R) Core(TM) i3-2100 CPU @ 3.10GHz
-    8G RAM
+        Intel(R) Core(TM) i3-2100 CPU @ 3.10GHz
+        8G RAM
 
-* 2 threads
-![2 threads](./scripts/histogram_2_threads_i3_2100.png)
+* Running time, 2 threads
+![2 threads running time](./scripts/histogram_2_threads_i3_2100.png)
 
-* 4 threads
-![4 threads](./scripts/histogram_4_threads_i3_2100.png)
+* Speedup, 2 threads
+![2 threads speedup](./scripts/speedup_histogram_2_threads_i3_2100.png)
+
+* Running time, 4 threads
+![4 threads running time](./scripts/histogram_4_threads_i3_2100.png)
+
+* Speedup, 4 threads
+![4 threads speedup](./scripts/speedup_histogram_4_threads_i3_2100.png)

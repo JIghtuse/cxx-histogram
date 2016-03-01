@@ -1,13 +1,14 @@
 #!/usr/bin/gnuplot
 
-set terminal pngcairo size 3840,2160 lw 10
+set grid
+set terminal pngcairo size 1920,1080 lw 5
 set output 'histogram.png'
 set logscale x 2
-set key font ",36"
-set tics font ",18"
-set xlabel "size of bitmap, pixels" font ",36"
-set ylabel "running time, seconds" font ",36"
-set title "Histogram calculation running time, nthreads=8" font ",72"
+set key font ",18"
+set tics font ",9"
+set xlabel "size of bitmap, pixels" font ",18"
+set ylabel "running time, seconds" font ",18"
+set title "Histogram calculation running time, nthreads=4 \n Intel(R) Core(TM) i3-2100 CPU @ 3.10GHz" font ",36"
 
 plot 'results.txt' u 1:2 w lines title 'sequential', \
      'results.txt' u 1:3 w lines title 'transactional', \
