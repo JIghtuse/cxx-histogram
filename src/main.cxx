@@ -185,6 +185,7 @@ void print_info(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
 
 double run_experiment(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
 {
+    std::fill(std::begin(histogram), std::end(histogram), 0);
     // print_info(bmap, nthreads, algorithm);
     auto t = hpctimer_wtime();
     switch (algorithm) {
@@ -236,16 +237,9 @@ int main(int argc, char* argv[])
     bitmap bmap(bitmap_size);
     std::array<double, 4> results;
 
-    std::fill(std::begin(histogram), std::end(histogram), 0);
     results[0] = run_experiment(bmap, nthreads, Algorithm::Sequential);
-
-    std::fill(std::begin(histogram), std::end(histogram), 0);
     results[1] = run_experiment(bmap, nthreads, Algorithm::TransacitonalMemory);
-
-    std::fill(std::begin(histogram), std::end(histogram), 0);
     results[2] = run_experiment(bmap, nthreads, Algorithm::Mutex);
-
-    std::fill(std::begin(histogram), std::end(histogram), 0);
     results[3] = run_experiment(bmap, nthreads, Algorithm::Atomic);
 
     std::cout << bitmap_size << ' ';
