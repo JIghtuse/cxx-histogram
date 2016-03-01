@@ -59,6 +59,9 @@ enum class Algorithm {
     Mutex,
 };
 
+using HistUpdateArray = std::array<int, histogram.size()>;
+using ParallelHistUpdater = void(*)(HistUpdateArray);
+
 void histogram_sequential(const bitmap& b, const size_t)
 {
     for (size_t i = 0; i < b.size(); ++i) {
@@ -74,69 +77,53 @@ size_t get_num_threads(const bitmap& b, const size_t nthreads)
     return std::min(nthreads ? nthreads : 2, max_threads);
 }
 
-void histogram_mutex(const bitmap& b, size_t start, size_t end)
+HistUpdateArray calculate_updates(const bitmap& b, size_t start, size_t end)
 {
+    auto updates = std::array<int, histogram.size()>{};
     for (size_t i = start; i < end; ++i) {
         auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        std::lock_guard<std::mutex> lock{histogram[bucket].m};
-        ++histogram[bucket].value;
+        ++updates[bucket];
     }
+    return updates;
 }
 
-void histogram_atomic(const bitmap& b, size_t start, size_t end)
+void histogram_mutex(HistUpdateArray updates)
 {
-    for (size_t i = start; i < end; ++i) {
-        auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        __sync_fetch_and_add(&histogram[bucket].value, 1);
-    }
-}
-
-void histogram_transactional(const bitmap& b, const size_t nthreads)
-{
-    auto num_threads = get_num_threads(b, nthreads);
-    size_t const block_size{b.size() / num_threads};
-
-    std::vector<std::future<void> > futures{num_threads - 1};
-    std::vector<std::thread> threads{num_threads - 1};
-    join_threads joiner(threads);
-
-    size_t block_start = 0;
-    for (size_t i = 0; i < (num_threads - 1); ++i) {
-        auto block_end = block_start;
-        block_end += block_size;
-
-        std::packaged_task<void(void)> task([block_start,block_end,&b] {
-            for (size_t j = block_start; j < block_end; ++j) {
-                auto bucket = static_cast<int>(luminance(b.pixels()[j]) / kBorder);
-                __transaction_atomic {
-                    ++histogram[bucket].value;
-                }
-            }
-        });
-        futures[i] = task.get_future();
-        threads[i] = std::thread(std::move(task));
-        block_start = block_end;
-    }
-    for (size_t i = block_start; i < b.size(); ++i) {
-        auto bucket = static_cast<int>(luminance(b.pixels()[i]) / kBorder);
-        __transaction_atomic {
-            ++histogram[bucket].value;
+    for (size_t i = 0; i < histogram.size(); ++i) {
+        if (updates[i]) {
+            std::lock_guard<std::mutex> lock{histogram[i].m};
+            histogram[i].value += updates[i];
         }
     }
-    for (size_t i = 0; i < (num_threads - 1); ++i) {
-        futures[i].get();
+}
+
+void histogram_atomic(HistUpdateArray updates)
+{
+    for (size_t i = 0; i < histogram.size(); ++i) {
+        if (updates[i]) {
+            __sync_fetch_and_add(&histogram[i].value, updates[i]);
+        }
     }
 }
 
-using ParallelHistFunction = void(*)(const bitmap&, const size_t, const size_t);
+void histogram_transactional(HistUpdateArray updates)
+{
+    for (size_t i = 0; i < histogram.size(); ++i) {
+        if (updates[i]) {
+            __transaction_atomic {
+                histogram[i].value += updates[i];
+            }
+        }
+    }
+}
 
-std::unordered_map<Algorithm, ParallelHistFunction, EnumClassHash> parallel_function_selector{
+std::unordered_map<Algorithm, ParallelHistUpdater, EnumClassHash> parallel_function_selector{
     { Algorithm::Atomic, histogram_atomic },
     { Algorithm::Mutex, histogram_mutex },
-//    { Algorithm::TransacitonalMemory, histogram_transactional },
+    { Algorithm::TransacitonalMemory, histogram_transactional },
 };
 
-void histogram_parallel(const bitmap& b, const size_t nthreads, ParallelHistFunction function)
+void histogram_parallel(const bitmap& b, const size_t nthreads, ParallelHistUpdater function)
 {
     auto num_threads = get_num_threads(b, nthreads);
     size_t const block_size{b.size() / num_threads};
@@ -151,14 +138,14 @@ void histogram_parallel(const bitmap& b, const size_t nthreads, ParallelHistFunc
         block_end += block_size;
 
         std::packaged_task<void(void)> task([block_start,block_end,function,&b] {
-            function(b, block_start, block_end);
+            function(calculate_updates(b, block_start, block_end));
         });
 
         futures[i] = task.get_future();
         threads[i] = std::thread(std::move(task));
         block_start = block_end;
     }
-    function(b, block_start, b.size());
+    function(calculate_updates(b, block_start, b.size()));
     for (size_t i = 0; i < (num_threads - 1); ++i) {
         futures[i].get();
     }
@@ -197,10 +184,8 @@ double run_experiment(const bitmap& bmap, size_t nthreads, Algorithm algorithm)
     switch (algorithm) {
     case Algorithm::Mutex:
     case Algorithm::Atomic:
-        histogram_parallel(bmap, nthreads, parallel_function_selector[algorithm]);
-        break;
     case Algorithm::TransacitonalMemory:
-        histogram_transactional(bmap, nthreads);
+        histogram_parallel(bmap, nthreads, parallel_function_selector[algorithm]);
         break;
     case Algorithm::Sequential:
         histogram_sequential(bmap, nthreads);
@@ -241,15 +226,11 @@ int main(int argc, char* argv[])
     }
 
     bitmap bmap(bitmap_size);
-    std::array<double, 4> results;
 
-    results[0] = run_experiment(bmap, nthreads, Algorithm::Sequential);
-    results[1] = run_experiment(bmap, nthreads, Algorithm::TransacitonalMemory);
-    results[2] = run_experiment(bmap, nthreads, Algorithm::Mutex);
-    results[3] = run_experiment(bmap, nthreads, Algorithm::Atomic);
-
-    std::cout << bitmap_size << ' ';
-    for (auto value : results)
-        std::cout << value << ' ';
-    std::cout << std::endl;
+    std::cout << bitmap_size << ' '
+              << run_experiment(bmap, nthreads, Algorithm::Sequential) << ' '
+              << run_experiment(bmap, nthreads, Algorithm::TransacitonalMemory) << ' '
+              << run_experiment(bmap, nthreads, Algorithm::Mutex) << ' '
+              << run_experiment(bmap, nthreads, Algorithm::Atomic) << ' '
+              << std::endl;
 }
